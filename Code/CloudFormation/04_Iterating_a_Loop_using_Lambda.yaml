@@ -1,0 +1,171 @@
+# 04_Iterating_a_Loop_using_Lambda.yaml
+# =====================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: When you follow the AWS Documentation, you will get these resources in your account
+
+Resources:
+
+  COS04IteratorExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS04IteratorExecutionRolePolicies:
+    DependsOn: COS04IteratorExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS04IteratorExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Roles:
+        -
+          Ref: "COS04IteratorExecutionRole"       
+  COS04Iterator:
+    DependsOn: 
+    - COS04IteratorExecutionRole
+    - COS04IteratorExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt COS04IteratorExecutionRole.Arn
+      Timeout: 3
+      Code:
+        ZipFile: |
+          exports.handler = function iterator (event, context, callback) {
+            let index = event.iterator.index
+            let step = event.iterator.step
+            let count = event.iterator.count
+          
+            index = index + step
+          
+            callback(null, {
+              index,
+              step,
+              count,
+              continue: index < count
+            })
+          }
+      Runtime: nodejs14.x
+
+  COS04IterateCountStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS04IterateCountInvokeScopedAccessPolicy:
+    DependsOn: COS04IterateCountStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS04IterateCountInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !Join ["", [!GetAtt COS04Iterator.Arn, ":*"]]
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !GetAtt COS04Iterator.Arn
+      Roles:
+        -
+          Ref: "COS04IterateCountStateMachineRole"       
+  COS04XRayAccessPolicy:
+    DependsOn: COS04IterateCountStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS04IterateCountInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "xray:PutTraceSegments"
+              - "xray:PutTelemetryRecords"
+              - "xray:GetSamplingRules"
+              - "xray:GetSamplingTargets"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS04IterateCountStateMachineRole"       
+  COS04IterateCountStatemachine:
+    DependsOn: COS04Iterator
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |
+        {
+            "Comment": "Iterator State Machine Example",
+            "StartAt": "ConfigureCount",
+            "States": {                
+                "ConfigureCount": {
+                    "Type": "Pass",
+                    "Result": {
+                        "count": 10,
+                        "index": 0,
+                        "step": 1
+                    },
+                    "ResultPath": "$.iterator",
+                    "Next": "Iterator"
+                },
+                "Iterator": {
+                    "Type": "Task",
+                    "Resource": "${COS04Iterator.Arn}",
+                    "ResultPath": "$.iterator",
+                    "Next": "IsCountReached"
+                },
+                "IsCountReached": {
+                    "Type": "Choice",
+                    "Choices": [
+                        {
+                            "Variable": "$.iterator.continue",
+                            "BooleanEquals": true,
+                            "Next": "ExampleWork"
+                        }
+                    ],
+                    "Default": "Done"
+                },
+                "ExampleWork": {
+                    "Comment": "Your application logic, to run a specific number of times",
+                    "Type": "Pass",
+                    "Result": {
+                      "success": true
+                    },
+                    "ResultPath": "$.result",
+                    "Next": "Iterator"
+                },
+                "Done": {
+                    "Type": "Pass",
+                    "End": true
+                  
+                }
+            }
+        }
+      RoleArn: !GetAtt COS04IterateCountStateMachineRole.Arn

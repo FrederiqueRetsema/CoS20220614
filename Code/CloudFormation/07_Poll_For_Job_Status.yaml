@@ -1,0 +1,370 @@
+# 07_Poll_For_Job_Status.yaml
+# ===========================
+# This is the sample code that is created by AWS when you select:
+# Create New Step Function >
+#   Sample Projects
+#     Job Poller
+#
+# The sample code is made available under a modified MIT license. See the LICENSE-SAMPLECODE file.
+# See this Git repo: https://github.com/awsdocs/aws-step-functions-developer-guide
+
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS Step Functions sample project for running an AWS Batch job and monitoring until it completes
+Resources:
+  COS07LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: BatchExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "batch:SubmitJob"
+                  - "batch:DescribeJobs"
+                Resource: "*"
+
+  COS07SubmitJobFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt [ COS07LambdaExecutionRole, Arn ]
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+
+          import json
+          import boto3
+
+          print('Loading function')
+          batch = boto3.client('batch')
+          def lambda_handler(event, context):
+              # Log the received event
+              print("Received event: " + json.dumps(event, indent=2))
+              # Get parameters for the SubmitJob call
+              # http://docs.aws.amazon.com/batch/latest/APIReference/API_SubmitJob.html
+              jobName = event['jobName']
+              jobQueue = event['jobQueue']
+              jobDefinition = event['jobDefinition']
+              # containerOverrides and parameters are optional
+              if event.get('containerOverrides'):
+                  containerOverrides = event['containerOverrides']
+              else:
+                  containerOverrides = {}
+              if event.get('parameters'):
+                  parameters = event['parameters']
+              else:
+                  parameters = {}
+
+              try:
+                  # Submit a Batch Job
+                  response = batch.submit_job(jobQueue=jobQueue, jobName=jobName, jobDefinition=jobDefinition,
+                                              containerOverrides=containerOverrides, parameters=parameters)
+                  # Log response from AWS Batch
+                  print("Response: " + json.dumps(response, indent=2))
+                  # Return the jobId
+                  jobId = response['jobId']
+                  return {
+                      'jobId': jobId
+                  }
+              except Exception as e:
+                  print(e)
+                  message = 'Error submitting Batch Job'
+                  print(message)
+                  raise Exception(message)
+      Runtime: "python3.9"
+      Timeout: "25"
+
+  COS07CheckJobFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt [ COS07LambdaExecutionRole, Arn ]
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+
+          import json
+          import boto3
+
+          print('Loading function')
+
+          batch = boto3.client('batch')
+
+          def lambda_handler(event, context):
+              # Log the received event
+              print("Received event: " + json.dumps(event, indent=2))
+              # Get jobId from the event
+              jobId = event['jobId']
+
+              try:
+                  # Call DescribeJobs
+                  response = batch.describe_jobs(jobs=[jobId])
+                  # Log response from AWS Batch
+                  print("Response: " + json.dumps(response, indent=2))
+                  # Return the jobtatus
+                  jobStatus = response['jobs'][0]['status']
+                  return jobStatus
+              except Exception as e:
+                  print(e)
+                  message = 'Error getting Batch Job status'
+                  print(message)
+                  raise Exception(message)
+      Runtime: "python3.9"
+      Timeout: "25"
+
+  COS07SampleVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+  COS07SampleInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: COS07SampleVPC
+  COS07COS07PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn:
+    - COS07SampleVPC
+    - COS07SampleVPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: COS07SampleVPC
+  COS07SampleVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DependsOn:
+    - COS07SampleVPC
+    - COS07SampleInternetGateway
+    Properties:
+      VpcId:
+        Ref: COS07SampleVPC
+      InternetGatewayId:
+        Ref: COS07SampleInternetGateway
+  COS07SampleSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: A security group for region-agnostic Batch resources
+      VpcId:
+        Ref: COS07SampleVPC
+  COS07SampleSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: COS07SampleVPCGatewayAttachment
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      VpcId:
+        Ref: COS07SampleVPC
+      MapPublicIpOnLaunch: 'True'
+  COS07PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+    - COS07COS07PublicRouteTable
+    - COS07SampleVPCGatewayAttachment
+    Properties:
+      RouteTableId:
+        Ref: COS07COS07PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: COS07SampleInternetGateway
+  COS07SampleSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: COS07COS07PublicRouteTable
+      SubnetId:
+        Ref: COS07SampleSubnet
+  COS07SampleAWSBatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: batch.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+  COS07SampleIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - Ref: COS07SampleEcsInstanceRole
+  COS07SampleEcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+  COS07SampleJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      ContainerProperties:
+        Image:
+          Fn::Join:
+          - ''
+          - - 137112412989.dkr.ecr.
+            - Ref: AWS::Region
+            - ".amazonaws.com/amazonlinux:latest"
+        Vcpus: 2
+        Memory: 2000
+        Command:
+        - echo
+        - Hello world
+      RetryStrategy:
+        Attempts: 1
+  COS07SampleJobQueue:
+    Type: AWS::Batch::JobQueue
+    DependsOn:
+    - COS07SampleComputeEnvironment
+    Properties:
+      Priority: 1
+      ComputeEnvironmentOrder:
+      - Order: 1
+        ComputeEnvironment:
+          Ref: COS07SampleComputeEnvironment
+  COS07SampleComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    DependsOn:
+    - COS07SampleSubnet
+    - COS07SampleSecurityGroup
+    - COS07SampleIamInstanceProfile
+    - COS07SampleAWSBatchServiceRole
+    Properties:
+      Type: MANAGED
+      ComputeResources:
+        Type: EC2
+        MinvCpus: 0
+        DesiredvCpus: 0
+        MaxvCpus: 64
+        InstanceTypes:
+        - optimal
+        Subnets:
+        - Ref: COS07SampleSubnet
+        SecurityGroupIds:
+        - Ref: COS07SampleSecurityGroup
+        InstanceRole:
+          Ref: COS07SampleIamInstanceProfile
+      ServiceRole:
+        Ref: COS07SampleAWSBatchServiceRole
+
+  COS07StatesExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: states.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+
+  COS07JobStatusPollerStateMachine:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "An example of the Amazon States Language that runs an AWS Batch job and monitors the job until it completes.",
+              "StartAt": "Submit Job",
+              "States": {
+                "Submit Job": {
+                  "Type": "Task",
+                  "Resource": "${submitJobArn}",
+                  "ResultPath": "$.guid",
+                  "Next": "Wait X Seconds"
+                },
+                "Wait X Seconds": {
+                  "Type": "Wait",
+                  "SecondsPath": "$.wait_time",
+                  "Next": "Get Job Status"
+                },
+                "Get Job Status": {
+                  "Type": "Task",
+                  "Resource": "${checkJobArn}",
+                  "Next": "Job Complete?",
+                  "InputPath": "$.guid",
+                  "ResultPath": "$.status"
+                },
+                "Job Complete?": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "FAILED",
+                      "Next": "Job Failed"
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "SUCCEEDED",
+                      "Next": "Get Final Job Status"
+                    }
+                  ],
+                  "Default": "Wait X Seconds"
+                },
+                "Job Failed": {
+                  "Type": "Fail",
+                  "Cause": "AWS Batch Job Failed",
+                  "Error": "DescribeJob returned FAILED"
+                },
+                "Get Final Job Status": {
+                  "Type": "Task",
+                  "Resource": "${checkJobArn}",
+                  "InputPath": "$.guid",
+                  "End": true
+                }
+              }
+            }
+          - {submitJobArn: !GetAtt [ COS07SubmitJobFunction, Arn ], checkJobArn: !GetAtt [ COS07CheckJobFunction, Arn ]}
+      RoleArn: !GetAtt [ COS07StatesExecutionRole, Arn ]
+
+Outputs:
+  COS07SampleComputeEnvironmentArn:
+    Value:
+      Ref: COS07SampleComputeEnvironment
+  COS07SampleJobQueueArn:
+    Value:
+      Ref: COS07SampleJobQueue
+  COS07SampleJobDefinition:
+    Value:
+      Ref: COS07SampleJobDefinition
+  StateMachineArn:
+    Value:
+      Ref: COS07JobStatusPollerStateMachine
+  ExecutionInput:
+    Description: Sample input to StartExecution.
+    Value:
+      !Sub
+        - |-
+          {
+            "jobName": "my-job",
+            "jobDefinition": "${jobDefinition}",
+            "jobQueue": "${jobQueue}",
+            "wait_time": 15
+          }
+        - {jobDefinition: !Ref COS07SampleJobDefinition, jobQueue: !Ref COS07SampleJobQueue }

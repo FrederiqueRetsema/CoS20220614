@@ -1,0 +1,143 @@
+# 01_Create_a_Step_Functions_State_Machine_That_Uses_Lambda
+# =========================================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: When you follow the AWS Documentation, you will get these resources in your account
+
+Resources:
+
+  COS01HelloFunctionExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS01HelloFunctionExecutionRolePolicies:
+    DependsOn: COS01HelloFunctionExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS01HelloFunctionExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "CloudWatch"
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS01HelloFunctionExecutionRole"       
+  COS01HelloFunctionFunction:
+    DependsOn: 
+    - COS01HelloFunctionExecutionRole
+    - COS01HelloFunctionExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt COS01HelloFunctionExecutionRole.Arn
+      Timeout: 3
+      Code:
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+              callback(null, "Hello from " + event.who + "!");
+          };
+      Runtime: nodejs14.x
+
+  COS01StepFunctions01LambdaStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS01LambdaInvokeScopedAccessPolicy:
+    DependsOn: COS01StepFunctions01LambdaStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS01LambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !Join ["", [!GetAtt COS01HelloFunctionFunction.Arn, ":*"]]
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !GetAtt COS01HelloFunctionFunction.Arn
+      Roles:
+        -
+          Ref: "COS01StepFunctions01LambdaStateMachineRole"       
+  COS01XRayAccessPolicy:
+    DependsOn: COS01StepFunctions01LambdaStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS01LambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "xray:PutTraceSegments"
+              - "xray:PutTelemetryRecords"
+              - "xray:GetSamplingRules"
+              - "xray:GetSamplingTargets"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS01StepFunctions01LambdaStateMachineRole"       
+  COS01LambdaStatemachine:
+    DependsOn: COS01HelloFunctionFunction
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |
+        {
+          "Comment": "A description of my state machine",
+          "StartAt": "Lambda Invoke",
+          "States": {
+            "Lambda Invoke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${COS01HelloFunctionFunction.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt COS01StepFunctions01LambdaStateMachineRole.Arn

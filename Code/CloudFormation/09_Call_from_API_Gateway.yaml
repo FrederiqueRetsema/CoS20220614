@@ -1,0 +1,239 @@
+# 08_Call_From_API_Gateway.yaml
+# =============================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Calls a step function from the API Gateway
+
+Parameters:
+  PathPart: 
+    Type: String
+    Default: "execution"
+  StageName:
+    Type: String
+    Default: "CoS"
+
+Resources:
+
+# 01_Create_a_Step_Functions_State_Machine_That_Uses_Lambda
+# =========================================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: When you follow the AWS Documentation, you will get these resources in your account
+
+Resources:
+
+  COS09HelloFunctionExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS09HelloFunctionExecutionRolePolicies:
+    DependsOn: COS09HelloFunctionExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS09HelloFunctionExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "CloudWatch"
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS09HelloFunctionExecutionRole"       
+  COS09HelloFunctionFunction:
+    DependsOn: 
+    - COS09HelloFunctionExecutionRole
+    - COS09HelloFunctionExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt COS09HelloFunctionExecutionRole.Arn
+      Timeout: 3
+      Code:
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+              callback(null, "Hello from " + event.who + "!");
+          };
+      Runtime: nodejs14.x
+
+  COS09StepFunctions01LambdaStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS09LambdaInvokeScopedAccessPolicy:
+    DependsOn: COS09StepFunctions01LambdaStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS09LambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !Join ["", [!GetAtt COS09HelloFunctionFunction.Arn, ":*"]]
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !GetAtt COS09HelloFunctionFunction.Arn
+      Roles:
+        -
+          Ref: "COS09StepFunctions01LambdaStateMachineRole"       
+  COS09XRayAccessPolicy:
+    DependsOn: COS09StepFunctions01LambdaStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS09LambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "xray:PutTraceSegments"
+              - "xray:PutTelemetryRecords"
+              - "xray:GetSamplingRules"
+              - "xray:GetSamplingTargets"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS09StepFunctions01LambdaStateMachineRole"       
+  COS09LambdaStatemachine:
+    DependsOn: COS09HelloFunctionFunction
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |
+        {
+          "Comment": "A description of my state machine",
+          "StartAt": "Lambda Invoke",
+          "States": {
+            "Lambda Invoke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${COS09HelloFunctionFunction.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt COS09StepFunctions01LambdaStateMachineRole.Arn
+
+  COS09APIGatewayExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "apigateway.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+        - arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess
+  
+  COS09APIGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: COS09APIGatewayRestApi
+  
+  COS09APIGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt COS09APIGatewayRestApi.RootResourceId
+      PathPart: !Ref PathPart
+      RestApiId: !Ref COS09APIGatewayRestApi
+
+  COS09APIGatewayMethodPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ResourceId: !Ref COS09APIGatewayResource
+      RestApiId: !Ref COS09APIGatewayRestApi
+      Integration:
+        ConnectionType: INTERNET
+        Credentials: !GetAtt COS09APIGatewayExecutionRole.Arn
+        IntegrationHttpMethod: POST
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:states:action/StartExecution"
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+
+  COS09APIGatewayDeployment:
+    DependsOn: COS09APIGatewayMethodPost
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      Description: Deployment CoS 2022-06-14
+      RestApiId: !Ref COS09APIGatewayRestApi
+      StageName: !Ref StageName
+      StageDescription: 
+        Description: Demo CoS 2022-06-14
+
+Outputs:
+  ExecutionTestInput:
+    Description: Sample input to API Gateway Test
+    Value:
+      !Sub
+        - |-
+          {
+            "input": "{\"who\":\"Conclusion publiek\"}",
+            "name": "MyExecution",
+            "stateMachineArn": "${stateMachineArnCOS09}"
+          }
+        - {stateMachineArnCOS09: !Ref COS09LambdaStatemachine}
+  ExecutionCurlInput:
+    Description: Sample input for curl command
+    Value:
+      !Sub 
+        - |-
+          curl -X POST -d '{"input": "{\"who\":\"Conclusion Publiek\"}",
+                            "name": "MyExecution",
+                            "stateMachineArn": "${stateMachineArnCOS09}"}'
+                            https://${COS09APIGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/${PathPart}
+        - {stateMachineArnCOS09: !Ref COS09LambdaStatemachine}

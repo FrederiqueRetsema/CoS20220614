@@ -1,0 +1,248 @@
+# 08_Call_From_Eventbridge.yaml
+# =============================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Starts Step Function when a new EC2 instance (Virtual Machine) is started
+
+Resources:
+
+  COS08DetermineNumberOfEC2sRunningExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS08DetermineNumberOfEC2sRunningExecutionRolePolicies:
+    DependsOn: COS08DetermineNumberOfEC2sRunningExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS08DetermineNumberOfEC2sRunningExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "CloudWatch"
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+              - "ec2:DescribeInstances"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS08DetermineNumberOfEC2sRunningExecutionRole"       
+  COS08DetermineNumberOfEC2sRunningFunction:
+    DependsOn: 
+    - COS08DetermineNumberOfEC2sRunningExecutionRole
+    - COS08DetermineNumberOfEC2sRunningExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt COS08DetermineNumberOfEC2sRunningExecutionRole.Arn
+      Timeout: 3
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          def lambda_handler(event, context):
+              print(event)
+
+              ec2 = boto3.client("ec2")
+              response = ec2.describe_instances(
+                Filters = [{
+                  "Name"   : "instance-state-name",
+                  "Values" : ["running"]
+                }]
+              )
+
+              number = 0
+              if response["Reservations"] != []:
+                number = len(response["Reservations"])
+
+              too_many = False
+              if number > 1:
+                too_many = True
+
+              return {
+                  'NumberOfInstances': number,
+                  'TooManyInstances': too_many
+              }
+      Runtime: python3.9
+
+  COS08EventBridgeIntegrationStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS08LambdaInvokeScopedAccessPolicy:
+    DependsOn: COS08EventBridgeIntegrationStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS08LambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !Join ["", [!GetAtt COS08DetermineNumberOfEC2sRunningFunction.Arn, ":*"]]
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !GetAtt COS08DetermineNumberOfEC2sRunningFunction.Arn
+          -
+            Effect: "Allow"
+            Action: 
+              - "sns:Publish"
+            Resource: !Ref COS08SNSTopic
+      Roles:
+        -
+          Ref: "COS08EventBridgeIntegrationStateMachineRole"       
+  COS08XRayAccessPolicy:
+    DependsOn: COS08EventBridgeIntegrationStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS08LambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "xray:PutTraceSegments"
+              - "xray:PutTelemetryRecords"
+              - "xray:GetSamplingRules"
+              - "xray:GetSamplingTargets"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS08EventBridgeIntegrationStateMachineRole"       
+  COS08SNSTopic:
+    Type: AWS::SNS::Topic
+  COS08EventBridgeStatemachine:
+    DependsOn: COS08DetermineNumberOfEC2sRunningFunction
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |
+        {
+          "Comment": "Check number of running instances",
+          "StartAt": "Check Number Of Running Instances",
+          "States": {
+            "Check Number Of Running Instances": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${COS08DetermineNumberOfEC2sRunningFunction}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "TooManyInstances"
+            },
+            "TooManyInstances": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.TooManyInstances",
+                  "BooleanEquals": true,
+                  "Next": "Error - send SNS"
+                }
+              ],
+              "Default": "Done"
+            },
+            "Error - send SNS": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "Message": "Too many running instances",
+                "TopicArn": "${COS08SNSTopic}"
+              },
+              "Next": "Done"
+            },
+            "Done": {
+              "Type": "Pass",
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt COS08EventBridgeIntegrationStateMachineRole.Arn
+  COS08EventBridgeRuleExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "events.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS08EventBridgeRuleExecutionRolePolicies:
+    DependsOn: COS08EventBridgeRuleExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS08EventBridgeRuleExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "StepFunctions"
+            Effect: "Allow"
+            Action: 
+              - "states:StartExecution"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS08EventBridgeRuleExecutionRole"       
+  COS08EventBridgeRuleCheckNumberOfRunningInstances:
+    DependsOn: 
+      - COS08EventBridgeRuleExecutionRole
+      - COS08EventBridgeRuleExecutionRolePolicies
+    Type: AWS::Events::Rule
+    Properties:
+      Name: COS08CheckNumberOfRunningInstances
+      Description: Change in number of running instances
+      EventPattern: !Sub |
+        {
+          "source": ["aws.ec2"],
+          "detail-type": ["EC2 Instance State-change Notification"],
+          "detail": {
+            "state": ["running"]
+          }
+        }
+      Targets:
+        - Arn: !GetAtt COS08EventBridgeStatemachine.Arn
+          Id: StateMachine
+          RoleArn: !GetAtt COS08EventBridgeRuleExecutionRole.Arn

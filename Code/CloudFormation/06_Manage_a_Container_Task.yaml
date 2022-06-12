@@ -1,0 +1,208 @@
+# 06_Manage_a_Container_Task.yaml
+# ===============================
+# This is the sample code that is created by AWS when you select:
+# Create New Step Function >
+#   Sample Projects
+#     Manage a Container Task
+#
+# The sample code is made available under a modified MIT license. See the LICENSE-SAMPLECODE file.
+# See this Git repo: https://github.com/awsdocs/aws-step-functions-developer-guide
+
+---
+  AWSTemplateFormatVersion: 2010-09-09
+  Description: AWS Step Functions sample project for getting notified on AWS Fargate task completion
+  Resources:
+    COS06ECSTaskNotificationStateMachine:
+      Type: AWS::StepFunctions::StateMachine
+      Properties:
+        RoleArn: !GetAtt [ COS06ECSRunTaskSyncExecutionRole, Arn ]
+        DefinitionString:
+          !Sub
+            - |-
+              {
+                "Comment": "An example of the Amazon States Language for notification on an AWS Fargate task completion",
+                "StartAt": "Run Fargate Task",
+                "TimeoutSeconds": 3600,
+                "States": {
+                  "Run Fargate Task": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::ecs:runTask.sync",
+                    "Parameters": {
+                      "LaunchType": "FARGATE",
+                      "Cluster": "${COS06ECSClusterArn}",
+                      "TaskDefinition": "${COS06ECSTaskDefinitionArn}",
+                      "NetworkConfiguration": {
+                        "AwsvpcConfiguration": {
+                          "Subnets": [
+                            "${subnetAz1}",
+                            "${subnetAz2}"
+                          ],
+                          "AssignPublicIp": "ENABLED"
+                        }
+                      }
+                    },
+                    "Next": "Notify Success",
+                    "Catch": [
+                        {
+                          "ErrorEquals": [ "States.ALL" ],
+                          "Next": "Notify Failure"
+                        }
+                    ]
+                  },
+                  "Notify Success": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+                    "Parameters": {
+                      "Message": "AWS Fargate Task started by Step Functions succeeded",
+                      "TopicArn": "${COS06SNSTopicArn}"
+                    },
+                    "End": true
+                  },
+                  "Notify Failure": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+                    "Parameters": {
+                      "Message": "AWS Fargate Task started by Step Functions failed",
+                      "TopicArn": "${COS06SNSTopicArn}"
+                    },
+                    "End": true
+                  }
+                }
+              }
+            - {COS06SNSTopicArn: !Ref COS06SNSTopic, COS06ECSClusterArn: !GetAtt COS06ECSCluster.Arn, COS06ECSTaskDefinitionArn: !Ref COS06ECSTaskDefinition, subnetAz1: !Ref COS06PubSubnetAz1, subnetAz2: !Ref COS06PubSubnetAz2}
+    COS06ECSRunTaskSyncExecutionRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: states.amazonaws.com
+              Action: "sts:AssumeRole"
+        Path: "/"
+        Policies:
+          - PolicyName: FargateTaskNotificationAccessPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "sns:Publish"
+                  Resource:
+                   - !Ref COS06SNSTopic
+                - Effect: Allow
+                  Action:
+                    - "ecs:RunTask"
+                  Resource:
+                    - !Ref COS06ECSTaskDefinition
+                - Effect: Allow
+                  Action:
+                    - "ecs:StopTask"
+                    - "ecs:DescribeTasks"
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                    - "events:PutTargets"
+                    - "events:PutRule"
+                    - "events:DescribeRule"
+                  Resource:
+                    - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule"
+    COS06SNSTopic:
+      Type: AWS::SNS::Topic
+    COS06ECSCluster:
+      Type: AWS::ECS::Cluster
+    COS06ECSTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        RequiresCompatibilities:
+          - "FARGATE"
+        Cpu: 256
+        Memory: 512
+        NetworkMode: awsvpc
+        ContainerDefinitions:
+          - Image: "public.ecr.aws/amazonlinux/amazonlinux:latest"
+            Name: "fargate-app"
+            PortMappings:
+            - ContainerPort: 80
+              HostPort: 80
+              Protocol: tcp
+            Essential: true
+            EntryPoint:
+            - sh
+            - "-c"
+            Command:
+            - /bin/sh -c "echo 'Hello from AWS Step Functions!'"
+    COS06VPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: 10.0.0.0/16
+        EnableDnsSupport: true
+        EnableDnsHostnames: true
+    COS06PubSubnetAz1:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref COS06VPC
+        CidrBlock: 10.0.0.0/24
+        AvailabilityZone:
+          Fn::Select:
+            - 0
+            - Fn::GetAZs: ""
+        Tags:
+          -
+            Key: "Name"
+            Value: !Join [ "/", [ !Ref COS06ECSCluster , 'Public' ] ]
+    COS06PubSubnetAz2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref COS06VPC
+        CidrBlock: 10.0.1.0/24
+        AvailabilityZone:
+          Fn::Select:
+            - 0
+            - Fn::GetAZs: ""
+        Tags:
+          -
+            Key: "Name"
+            Value: !Join [ "/", [ !Ref COS06ECSCluster , 'Public' ] ]
+    COS06InternetGateway:
+      Type: AWS::EC2::InternetGateway
+    COS06AttachGateway:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref COS06VPC
+        InternetGatewayId: !Ref COS06InternetGateway
+    COS06RouteViaIgw:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref COS06VPC
+    COS06PublicRouteViaIgw:
+      Type: AWS::EC2::Route
+      DependsOn: COS06AttachGateway
+      Properties:
+        RouteTableId: !Ref COS06RouteViaIgw
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref COS06InternetGateway
+    COS06PubSubnet1RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref COS06PubSubnetAz1
+        RouteTableId: !Ref COS06RouteViaIgw
+    COS06PubSubnet2RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref COS06PubSubnetAz2
+        RouteTableId: !Ref COS06RouteViaIgw
+    COS06ECSSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: ECS Allowed Ports
+        VpcId: !Ref COS06VPC
+  Outputs:
+    StateMachineArn:
+      Value: !Ref COS06ECSTaskNotificationStateMachine
+    ExecutionInput:
+      Description: Sample input to StartExecution.
+      Value:
+        >
+          {}

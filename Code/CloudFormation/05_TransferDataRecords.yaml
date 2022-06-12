@@ -1,0 +1,200 @@
+# 05_TransferDataRecords.yaml
+# ===========================
+# This is the sample code that is created by AWS when you select:
+# Create New Step Function >
+#   Sample Projects
+#     TransferDataRecords
+#
+# The sample code is made available under a modified MIT license. See the LICENSE-SAMPLECODE file.
+# See this Git repo: https://github.com/awsdocs/aws-step-functions-developer-guide
+
+---
+  AWSTemplateFormatVersion: 2010-09-09
+  Description: AWS Step Functions sample project for reading messages from a DynamoDB table and sending them to SQS
+  Resources:
+    COS05DynamoDBToSQSStateMachine:
+      Type: AWS::StepFunctions::StateMachine
+      Properties:
+        RoleArn: !GetAtt [ COS05DynamoDBToSQSExecutionRole, Arn ]
+        DefinitionString:
+          !Sub
+            - |-
+              {
+                "Comment" : "An example of the Amazon States Language for reading messages from a DynamoDB table and sending them to SQS",
+                "StartAt": "Seed the DynamoDB Table",
+                "TimeoutSeconds": 3600,
+                "States": {
+                  "Seed the DynamoDB Table": {
+                    "Type": "Task",
+                    "Resource": "${COS05SeedingFunctionArn}",
+                    "ResultPath": "$.List",
+                    "Next": "For Loop Condition"
+                  },
+                  "For Loop Condition": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Not": {
+                          "Variable": "$.List[0]",
+                          "StringEquals": "DONE"
+                        },
+                        "Next": "Read Next Message from DynamoDB"
+                      }
+                    ],
+                    "Default": "Succeed"
+                  },
+                  "Read Next Message from DynamoDB": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::dynamodb:getItem",
+                    "Parameters": {
+                      "TableName": "${COS05DDBTableName}",
+                      "Key": {
+                        "MessageId": {"S.$": "$.List[0]"}
+                      }
+                    },
+                    "ResultPath": "$.DynamoDB",
+                    "Next": "Send Message to SQS"
+                  },
+                  "Send Message to SQS": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::sqs:sendMessage",
+                    "Parameters": {
+                      "MessageBody.$": "$.DynamoDB.Item.Message.S",
+                      "QueueUrl": "${COS05SQSQueueUrl}"
+                    },
+                    "ResultPath": "$.SQS",
+                    "Next": "Pop Element from List"
+                  },
+                  "Pop Element from List": {
+                    "Type": "Pass",
+                    "Parameters": {
+                      "List.$": "$.List[1:]"
+                    },
+                    "Next": "For Loop Condition"
+                  },
+                  "Succeed": {
+                    "Type": "Succeed"
+                  }
+                }
+              }
+            - {COS05DDBTableName: !Ref COS05DDBTable, COS05SQSQueueUrl: !Ref COS05SQSQueue, COS05SeedingFunctionArn: !GetAtt [ COS05SeedingFunction, Arn ] }
+    COS05DynamoDBToSQSExecutionRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: states.amazonaws.com
+              Action: "sts:AssumeRole"
+        Path: "/"
+        Policies:
+          - PolicyName: DynamoDBAndSQSAccessPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "dynamodb:GetItem"
+                  Resource:
+                    - !GetAtt COS05DDBTable.Arn
+                - Effect: Allow
+                  Action:
+                    - "sqs:SendMessage"
+                  Resource:
+                    - !GetAtt COS05SQSQueue.Arn
+                - Effect: Allow
+                  Action:
+                    - "lambda:invokeFunction"
+                  Resource:
+                    - !GetAtt [ COS05SeedingFunction, Arn ]
+    COS05DDBTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        ProvisionedThroughput:
+          ReadCapacityUnits: "10"
+          WriteCapacityUnits: "10"
+        AttributeDefinitions:
+          -
+            AttributeName: "MessageId"
+            AttributeType: "S"
+        KeySchema:
+          -
+            AttributeName: "MessageId"
+            KeyType: "HASH"
+    COS05SQSQueue:
+          Type: AWS::SQS::Queue
+
+    COS05SeedingFunction:
+      Type: "AWS::Lambda::Function"
+      Properties:
+        Handler: "index.lambda_handler"
+        Role: !GetAtt [ COS05SeedingFunctionExecutionRole, Arn ]
+        Code:
+          ZipFile:
+            !Sub
+              - |-
+                console.log('Loading function');
+                const AWS = require('aws-sdk');
+
+                exports.lambda_handler = (event, context, callback) => {
+                    var docClient = new AWS.DynamoDB.DocumentClient();
+                    var messageIds = []
+
+                    for (var i = 0; i < 10; i++) {
+                      console.log("Adding a new item...");
+                      var messageId = "MessageNo" + i.toString();
+                      messageIds.push(messageId);
+
+                      var message = "Hi! This is message no " + i.toString();
+                      var params = {
+                          TableName: "${COS05DDBTableName}",
+                          Item:{
+                              "MessageId": messageId,
+                              "Message": message
+                          }
+                      };
+                      docClient.put(params, function(err, data) {
+                          if (err) {
+                              console.error("Unable to add item. Error JSON:", JSON.stringify(err, null, 2));
+                          } else {
+                              console.log("Added item:", JSON.stringify(data, null, 2));
+                          }
+                      });
+                    };
+                    messageIds.push("DONE");
+                    callback(null, messageIds);
+                };
+              - {COS05DDBTableName: !Ref COS05DDBTable}
+
+        Runtime: "nodejs14.x"
+        Timeout: "60"
+    COS05SeedingFunctionExecutionRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: "sts:AssumeRole"
+        Policies:
+          - PolicyName: COS05SeedingFunctionExecutionPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "dynamodb:PutItem"
+                  Resource: !GetAtt COS05DDBTable.Arn
+
+  Outputs:
+    StateMachineArn:
+      Value: !Ref COS05DynamoDBToSQSStateMachine
+    ExecutionInput:
+      Description: Sample input to StartExecution.
+      Value:
+        >
+          {}

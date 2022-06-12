@@ -1,0 +1,132 @@
+# 03_Using_a_Map_State_to_Call_Lambda_Multiple_Times
+# ==================================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: When you follow the AWS Documentation, you will get these resources in your account
+
+Resources:
+
+  COS03HelloFunctionExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS03HelloFunctionExecutionRolePolicies:
+    DependsOn: COS03HelloFunctionExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS03HelloFunctionExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Roles:
+        -
+          Ref: "COS03HelloFunctionExecutionRole"       
+  COS03HelloFunction:
+    DependsOn: 
+    - COS03HelloFunctionExecutionRole
+    - COS03HelloFunctionExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt COS03HelloFunctionExecutionRole.Arn
+      Timeout: 3
+      Code:
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+              callback(null, "Hello, " + event.who + "!");
+          };
+      Runtime: nodejs12.x
+
+  COS03MapLambdaStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS03MapLambdaInvokeScopedAccessPolicy:
+    DependsOn: COS03MapLambdaStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS03MapLambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !Join ["", [!GetAtt COS03HelloFunction.Arn, ":*"]]
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !GetAtt COS03HelloFunction.Arn
+      Roles:
+        -
+          Ref: "COS03MapLambdaStateMachineRole"       
+  COS03XRayAccessPolicy:
+    DependsOn: COS03MapLambdaStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS03MapLambdaInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "xray:PutTraceSegments"
+              - "xray:PutTelemetryRecords"
+              - "xray:GetSamplingRules"
+              - "xray:GetSamplingTargets"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS03MapLambdaStateMachineRole"       
+  COS03MapLambdaStatemachine:
+    DependsOn: COS03HelloFunction
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |
+        {
+          "StartAt": "ExampleMapState",
+          "States": {
+            "ExampleMapState": {
+              "Type": "Map",
+              "Iterator": {
+                "StartAt": "CallLambda",
+                "States": {
+                  "CallLambda": {
+                    "Type": "Task",
+                    "Resource": "${COS03HelloFunction.Arn}",
+                    "End": true
+                  }
+                }
+              },
+              "End": true
+            }
+          }
+        } 
+      RoleArn: !GetAtt COS03MapLambdaStateMachineRole.Arn

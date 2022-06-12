@@ -1,0 +1,167 @@
+# 02_Handling_Error_Conditions_Using_a_Step_Functions_State_Machine
+# =================================================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: When you follow the AWS Documentation, you will get these resources in your account
+
+Resources:
+
+  COS02ErrorFunctionExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS02ErrorFunctionExecutionRolePolicies:
+    DependsOn: COS02ErrorFunctionExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS02ErrorFunctionExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Roles:
+        -
+          Ref: "COS02ErrorFunctionExecutionRole"       
+  COS02ErrorFunction:
+    DependsOn: 
+    - COS02ErrorFunctionExecutionRole
+    - COS02ErrorFunctionExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt COS02ErrorFunctionExecutionRole.Arn
+      Timeout: 3
+      Code:
+        ZipFile: |
+          exports.handler = async (event, context) => {
+              function CustomError(message) {
+                  this.name = 'CustomError';
+                  this.message = message;
+              }
+              CustomError.prototype = new Error();
+
+              throw new CustomError('This is a custom error!');
+          };
+      Runtime: nodejs12.x
+
+  COS02CatchFailureStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  COS02CatchFailureInvokeScopedAccessPolicy:
+    DependsOn: COS02CatchFailureStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS02CatchFailureInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !Join ["", [!GetAtt COS02ErrorFunction.Arn, ":*"]]
+          -
+            Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !GetAtt COS02ErrorFunction.Arn
+      Roles:
+        -
+          Ref: "COS02CatchFailureStateMachineRole"       
+  COS02XRayAccessPolicy:
+    DependsOn: COS02CatchFailureStateMachineRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "COS02CatchFailureInvokeScopedAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "xray:PutTraceSegments"
+              - "xray:PutTelemetryRecords"
+              - "xray:GetSamplingRules"
+              - "xray:GetSamplingTargets"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "COS02CatchFailureStateMachineRole"       
+  COS02CatchFailureStatemachine:
+    DependsOn: COS02ErrorFunction
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |
+        {
+          "Comment": "A Catch example of the Amazon States Language using an AWS Lambda function",
+          "StartAt": "CreateAccount",
+          "States": {
+            "CreateAccount": {
+              "Type": "Task",
+              "Resource": "${COS02ErrorFunction.Arn}",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "CustomError"
+                  ],
+                  "Next": "CustomErrorFallback"
+                },
+                {
+                  "ErrorEquals": [
+                    "States.TaskFailed"
+                  ],
+                  "Next": "ReservedTypeFallback"
+                },
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "CatchAllFallback"
+                }
+              ],
+              "End": true
+            },
+            "CustomErrorFallback": {
+              "Type": "Pass",
+              "Result": "This is a fallback from a custom Lambda function exception",
+              "End": true
+            },
+            "ReservedTypeFallback": {
+              "Type": "Pass",
+              "Result": "This is a fallback from a reserved error code",
+              "End": true
+            },
+            "CatchAllFallback": {
+              "Type": "Pass",
+              "Result": "This is a fallback from any error code",
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt COS02CatchFailureStateMachineRole.Arn
+  SNSTopicDummy: 
+    Type: AWS::SNS::Topic
